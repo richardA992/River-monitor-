@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>River gauge monitor</title>
+<style>
+:root{--bg:#f6f7f8;--panel:#fff;--ink:#14202b;--dim:#5d6b78;--line:#dde2e7;--bad:#c62828;--badbg:#fdeceb;--warn:#a65f00;--warnbg:#fff3df;--ok:#1b7f4b;--info:#7a8794}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1319;--panel:#151d25;--ink:#e6edf3;--dim:#93a1ae;--line:#26313b;--bad:#ff6b63;--badbg:#2b1618;--warn:#f0a63a;--warnbg:#2a2113;--ok:#4cc38a;--info:#6c7a88}}
+*{box-sizing:border-box}
+html{padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;padding:16px;font-variant-numeric:tabular-nums}
+h1{font-size:20px;margin:0 0 2px}
+.sub{color:var(--dim);font-size:13px;margin-bottom:12px}
+.bar{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin-bottom:12px}
+.count{padding:6px 12px;border-radius:6px;background:var(--panel);border:1px solid var(--line);font-weight:600}
+.count.bad{color:var(--bad)}.count.warn{color:var(--warn)}.count.ok{color:var(--ok)}.count.info{color:var(--info)}
+.ctl{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;font-size:13px;color:var(--dim)}
+input[type=number]{width:56px;padding:4px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--ink)}
+button{padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);cursor:pointer;font:inherit;font-size:13px}
+button:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid var(--ok);outline-offset:2px}
+#banner{display:none;padding:10px 12px;border-radius:6px;background:var(--badbg);color:var(--bad);margin-bottom:12px;font-weight:600}
+#notice{display:none;padding:10px 12px;border-radius:6px;background:var(--warnbg);color:var(--warn);margin-bottom:12px}
+.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;min-width:520px}
+@media (max-width:600px){table{min-width:0}th:nth-child(4),td:nth-child(4){display:none}}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--panel)}
+tr.s2 td:first-child{box-shadow:inset 4px 0 var(--bad)}tr.s1 td:first-child{box-shadow:inset 4px 0 var(--warn)}tr.s2{background:var(--badbg)}
+td a{color:inherit;font-weight:600}
+.iss{display:block}.iss.e{color:var(--bad)}.iss.w{color:var(--warn)}.iss.i{color:var(--info)}.iss.o{color:var(--ok)}
+.dim{color:var(--dim)}
+</style>
+</head>
+<body>
+<h1>River gauge monitor</h1>
+<div class="sub">NWS National Water Prediction Service, cross-checked against USGS. <span id="stamp">Loading…</span></div>
+<div id="banner"></div>
+<div id="notice"></div>
+<div class="bar">
+  <span class="count bad" id="cBad">0 problems</span>
+  <span class="count warn" id="cWarn">0 warnings</span>
+  <span class="count ok" id="cOk">0 OK</span>
+</div>
+<div class="ctl">
+  <label>Stale after <input type="number" id="stale" value="6" min="1" max="72"> hours</label>
+  <label><input type="checkbox" id="only"> Issues only</label>
+  <button id="refresh">Refresh now</button>
+  <button id="notify">Enable desktop alerts</button>
+</div>
+<p></p>
+<div class="wrap">
+<table>
+  <thead><tr><th>Site and issues</th><th>NWS stage</th><th>Last obs</th><th>Forecast</th><th>USGS stage</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+</div>
+
+<script>
+// NWS ID : USGS ID (blank = none)
+const SITES = ("amok2:03610200,apxk2:03320500,bahk2:,bark2:,bdpm7:,bmmi2:05595700,boni2:05595860,brki2:,broi2:03378000,bsii2:05595765,"+
+"calk2:03320000,cari2:03381495,cdzk2:03438000,cfmi2:05595820,ciri2:,clrm7:07062000,codi2:,comm7:,cpgm7:07020850,crdm7:,"+
+"crri2:03382100,dkli2:,dnzm7:07068000,eddi2:03384450,evvi3:03322000,fmni2:03612000,fskm7:,ftbi3:03322011,gcrm7:07021020,gcti2:,"+
+"gdti2:,goli2:03384500,hbbm7:,henk2:03322190,hkmk2:,hlbk2:03437495,hlhk2:03437480,hlwk2:03437370,hpkk2:03437500,kydk2:,"+
+"lbfm7:07068510,lgli2:,lprm7:07062500,lrdm7:07043500,lvmk2:03319885,mcoi2:05597500,mcpk2:03611260,mocm7:,mtvi3:,muri2:05599490,"+
+"murk2:03610000,nbgi3:03304300,nhri3:03378500,nmdm7:,onyk2:03383000,owbk2:,pahk2:03611000,pazm7:07037500,pclm7:,plmi2:05597000,"+
+"pnti3:03376500,ppbm7:07063000,prdk2:03316500,rcpk2:03316645,rndi2:,rrlm7:,sabm7:,scpm7:07020550,shni2:,smli2:03399801,"+
+"sptk2:03321500,thbi2:07022000,unwk2:03322420,vbsm7:07067500,vnbm7:07067000,wadi3:03378550,wlmm7:07062575,wnsi3:03376300,wppm7:07039000,wrci2:05595730,"+
+"wyni2:03380500,zcrm7:07021000").split(",").map(s=>{const [n,u]=s.split(":");return {id:n.toUpperCase(),usgs:u||""}});
+
+const NWS="https://api.water.noaa.gov/nwps/v1";
+const REFRESH_MIN=15, FLAT_POINTS=8, FC_STALE_H=36, DIFF_FT=1;
+const $=id=>document.getElementById(id);
+let results=[], lastBad=new Set();
+// Sites seen with a forecast before; a site that never had one is treated as obs-only, not a problem
+let HAD_FC=new Set();
+try{ HAD_FC=new Set(JSON.parse(localStorage.getItem("hadFc")||"[]")); }catch(e){}
+
+function getJSON(url){
+  return new Promise((resolve,reject)=>{
+    const x=new XMLHttpRequest();
+    x.open("GET",url); x.timeout=20000;
+    x.onload=()=>{ if(x.status>=200&&x.status<300){ try{resolve(JSON.parse(x.responseText));}catch(e){reject(new Error("bad JSON"));} } else reject(new Error("HTTP "+x.status)); };
+    x.onerror=()=>reject(new Error("request blocked or offline"));
+    x.ontimeout=()=>reject(new Error("timed out"));
+    x.send();
+  });
+}
+const ok=v=>typeof v==="number" && isFinite(v) && v>-900;   // rejects null and -999 style sentinels
+const hrs=d=>(Date.now()-d.getTime())/3.6e6;
+const fmtAge=h=>h<1?Math.round(h*60)+"m":h<48?h.toFixed(1)+"h":(h/24).toFixed(1)+"d";
+
+async function loadUsgs(){
+  const ids=SITES.filter(s=>s.usgs).map(s=>s.usgs).join(",");
+  const j=await getJSON(`https://waterservices.usgs.gov/nwis/iv/?format=json&sites=${ids}&parameterCd=00065&period=PT12H&siteStatus=all`);
+  const m={};
+  for(const ts of j.value.timeSeries){
+    const id=ts.sourceInfo.siteCode[0].value;
+    for(const v of (ts.values[0]?.value||[])){
+      const n=parseFloat(v.value), t=new Date(v.dateTime);
+      if(ok(n) && (!m[id]||t>m[id].t)) m[id]={val:n,t};
+    }
+  }
+  return m;
+}
+
+async function checkSite(site,usgs,staleH){
+  const res={site,issues:[],sev:0,stage:null,units:"",obsAge:null,fc:"none",usgsTxt:site.usgs?"":"n/a"};
+  const add=(sev,msg)=>{res.issues.push({sev,msg});res.sev=Math.max(res.sev,sev)};
+  let d;
+  try{ d=await getJSON(`${NWS}/gauges/${site.id}/stageflow`); }
+  catch(e){ add(2,"NWS API error: "+e.message); return res; }
+
+  const obs=d.observed||{}, fc=d.forecast||{}, pts=obs.data||[];
+  res.units=obs.primaryUnits||"";
+  if(!pts.length) add(2,"No observed data returned");
+  else{
+    const latest=pts[pts.length-1];
+    if(!ok(latest.primary)) add(2,"Latest value is missing or a sentinel ("+latest.primary+")");
+    const valid=pts.filter(p=>ok(p.primary));
+    const lv=valid[valid.length-1];
+    if(lv){
+      res.stage=lv.primary; res.obsAge=hrs(new Date(lv.validTime));
+      if(res.obsAge>staleH*2) add(2,"No new observation in "+fmtAge(res.obsAge));
+      else if(res.obsAge>staleH) add(1,"Observation is "+fmtAge(res.obsAge)+" old");
+      const tail=valid.slice(-FLAT_POINTS);
+      if(tail.length===FLAT_POINTS && tail.every(p=>p.primary===tail[0].primary)){
+        const span=(new Date(tail[tail.length-1].validTime)-new Date(tail[0].validTime))/3.6e6;
+        if(span>=3) add(1,"Flatlined at "+tail[0].primary+" for "+span.toFixed(1)+"h");
+      }
+    }
+  }
+  const fpts=(fc.data||[]).filter(p=>ok(p.primary));
+  if(fpts.length){
+    const peak=Math.max(...fpts.map(p=>p.primary));
+    res.fc="peak "+peak.toFixed(1)+" "+(fc.primaryUnits||res.units);
+    if(fc.issuedTime){
+      const h=hrs(new Date(fc.issuedTime)); res.fc+=" · issued "+fmtAge(h)+" ago";
+      if(h>FC_STALE_H) add(1,"Forecast issued "+fmtAge(h)+" ago");
+    }
+    HAD_FC.add(site.id);
+  } else if(HAD_FC.has(site.id)) add(1,"Forecast missing (this site had one before)");
+  else res.fc="obs only";
+
+  if(site.usgs && usgs){
+    const u=usgs[site.usgs];
+    if(!u){ res.usgsTxt="none"; add(1,"USGS has no recent stage reading"); }
+    else{
+      const h=hrs(u.t); res.usgsTxt=u.val.toFixed(2)+" ft · "+fmtAge(h);
+      if(h>staleH) add(1,"USGS reading is "+fmtAge(h)+" old");
+      if(res.stage!=null && /ft/i.test(res.units) && Math.abs(u.val-res.stage)>DIFF_FT)
+        add(1,"NWS and USGS differ by "+Math.abs(u.val-res.stage).toFixed(1)+" ft (check datum)");
+    }
+  }
+  return res;
+}
+
+async function pool(items,n,fn){
+  const out=new Array(items.length); let i=0;
+  await Promise.all(Array.from({length:n},async()=>{ while(i<items.length){const k=i++; out[k]=await fn(items[k]);} }));
+  return out;
+}
+
+function render(){
+  const only=$("only").checked;
+  const sorted=[...results].sort((a,b)=>b.sev-a.sev||a.site.id.localeCompare(b.site.id));
+  const bad=sorted.filter(r=>r.sev===2), warn=sorted.filter(r=>r.sev===1);
+  $("cBad").textContent=bad.length+" problem"+(bad.length===1?"":"s");
+  $("cWarn").textContent=warn.length+" warning"+(warn.length===1?"":"s");
+  $("cOk").textContent=sorted.filter(r=>!r.issues.length).length+" OK";
+  document.title=(bad.length?"("+bad.length+") ":"")+"River gauge monitor";
+  const b=$("banner");
+  if(bad.length){b.style.display="block";b.textContent=bad.length+" site"+(bad.length===1?"":"s")+" with bad or missing data: "+bad.slice(0,8).map(r=>r.site.id).join(", ")+(bad.length>8?"…":"");}
+  else b.style.display="none";
+
+  $("rows").innerHTML=sorted.filter(r=>!only||r.sev>0).map(r=>{
+    const s=r.site;
+    const iss=r.issues.length?r.issues.map(i=>`<span class="iss ${["i","w","e"][i.sev]}">${i.msg}</span>`).join(""):`<span class="iss o">OK</span>`;
+    const stage=r.stage!=null?r.stage.toFixed(2)+" "+r.units:"—";
+    return `<tr class="s${r.sev}"><td><a href="https://water.noaa.gov/gauges/${s.id}" target="_blank" rel="noopener">${s.id}</a><div class="dim">${s.usgs||"no USGS ID"}</div>${iss}</td>`+
+      `<td>${stage}</td><td>${r.obsAge!=null?fmtAge(r.obsAge)+" ago":"—"}</td><td>${r.fc}</td><td>${r.usgsTxt||"—"}</td></tr>`;
+  }).join("");
+}
+
+function alertNew(){
+  const now=new Set(results.filter(r=>r.sev===2).map(r=>r.site.id));
+  const fresh=[...now].filter(id=>!lastBad.has(id));
+  if(lastBad.size+fresh.length && fresh.length && "Notification" in window && Notification.permission==="granted")
+    new Notification("River gauge problem",{body:fresh.slice(0,10).join(", ")});
+  lastBad=now;
+}
+
+let busy=false;
+async function run(){
+  if(busy) return; busy=true;
+  $("stamp").textContent="Refreshing…";
+  const staleH=Math.max(1,+$("stale").value||6);
+  let usgs=null; const n=$("notice");
+  try{ usgs=await loadUsgs(); n.style.display="none"; }
+  catch(e){ n.style.display="block"; n.textContent="USGS data unavailable ("+e.message+"). Showing NWS checks only."; }
+  results=await pool(SITES,6,s=>checkSite(s,usgs,staleH));
+  try{ localStorage.setItem("hadFc",JSON.stringify([...HAD_FC])); }catch(e){}
+  render(); alertNew();
+  $("stamp").textContent="Updated "+new Date().toLocaleTimeString()+" · auto-refreshes every "+REFRESH_MIN+" min";
+  busy=false;
+}
+
+$("only").addEventListener("change",render);
+$("stale").addEventListener("change",run);
+$("refresh").addEventListener("click",run);
+$("notify").addEventListener("click",()=>{ if("Notification" in window) Notification.requestPermission().then(p=>$("notify").textContent=p==="granted"?"Desktop alerts on":"Alerts blocked"); });
+run(); setInterval(run,REFRESH_MIN*60000);
+</script>
+</body>
+</html>
