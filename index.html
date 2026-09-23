@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -44,6 +45,7 @@ td a{color:inherit;font-weight:600}
 </div>
 <div class="ctl">
   <label>Stale after <input type="number" id="stale" value="6" min="1" max="72"> hours</label>
+  <label>Flag jumps over <input type="number" id="jump" value="3" min="0.5" step="0.5"> ft</label>
   <label><input type="checkbox" id="only"> Issues only</label>
   <button id="refresh">Refresh now</button>
   <button id="notify">Enable desktop alerts</button>
@@ -69,7 +71,8 @@ const SITES = ("amok2:03610200,apxk2:03320500,bahk2:,bark2:,bdpm7:,bmmi2:0559570
 "wyni2:03380500,zcrm7:07021000").split(",").map(s=>{const [n,u]=s.split(":");return {id:n.toUpperCase(),usgs:u||""}});
 
 const NWS="https://api.water.noaa.gov/nwps/v1";
-const REFRESH_MIN=15, FLAT_POINTS=8, FC_STALE_H=36, DIFF_FT=1;
+const REFRESH_MIN=15, FLAT_POINTS=8, FC_STALE_H=36, DIFF_FT=1, GAP_H=3;
+const JUMP_OVERRIDE={}; // per-site jump limit in ft, e.g. {AMOK2:6}
 const $=id=>document.getElementById(id);
 let results=[], lastBad=new Set();
 // Sites seen with a forecast before; a site that never had one is treated as obs-only, not a problem
@@ -104,12 +107,12 @@ async function loadUsgs(){
   return m;
 }
 
-async function checkSite(site,usgs,staleH){
+async function checkSite(site,usgs,staleH,jumpFt){
   const res={site,issues:[],sev:0,stage:null,units:"",obsAge:null,fc:"none",usgsTxt:site.usgs?"":"n/a"};
   const add=(sev,msg)=>{res.issues.push({sev,msg});res.sev=Math.max(res.sev,sev)};
   let d;
   try{ d=await getJSON(`${NWS}/gauges/${site.id}/stageflow`); }
-  catch(e){ add(2,"NWS API error: "+e.message); return res; }
+  catch(e){ add(2,e.message==="HTTP 404"?"Not found in NWS system (check the ID)":"NWS API error: "+e.message); return res; }
 
   const obs=d.observed||{}, fc=d.forecast||{}, pts=obs.data||[];
   res.units=obs.primaryUnits||"";
@@ -130,6 +133,32 @@ async function checkSite(site,usgs,staleH){
       }
     }
   }
+  // Last 24h: missing readings, data gaps, sudden jumps, single-point spikes
+  if(pts.length){
+    const cutoff=Date.now()-24*3.6e6;
+    const recent=pts.filter(p=>new Date(p.validTime).getTime()>=cutoff);
+    const nBad=recent.filter(p=>!ok(p.primary)).length;
+    if(nBad) add(1,nBad+" missing or bad reading"+(nBad>1?"s":"")+" in last 24h");
+    const v=recent.filter(p=>ok(p.primary)).map(p=>({t:new Date(p.validTime).getTime(),y:p.primary}));
+    let gap=0;
+    for(let i=1;i<v.length;i++) gap=Math.max(gap,(v[i].t-v[i-1].t)/3.6e6);
+    if(gap>GAP_H) add(1,"Data gap of "+fmtAge(gap)+" in last 24h");
+    if(/ft/i.test(res.units)){
+      const lim=JUMP_OVERRIDE[site.id]||jumpFt;
+      let spike=null, jump=null;
+      for(let i=1;i<v.length;i++){
+        const d=v[i].y-v[i-1].y, dt=(v[i].t-v[i-1].t)/3.6e6;
+        if(Math.abs(d)>=lim && dt<=2 && (!jump||Math.abs(d)>Math.abs(jump.d))) jump={d,dt};
+        if(i<v.length-1){
+          const a=v[i-1].y, b=v[i].y, c=v[i+1].y;
+          if(Math.abs(b-a)>=lim && Math.abs(b-c)>=lim && Math.abs(a-c)<=lim/3 && (!spike||Math.abs(b-a)>spike)) spike=Math.abs(b-a);
+        }
+      }
+      if(spike) add(2,"Likely bad reading: one value jumped "+spike.toFixed(1)+" ft, then came back");
+      else if(jump) add(1,"Caution: "+(jump.d>0?"rose ":"dropped ")+Math.abs(jump.d).toFixed(1)+" ft in "+fmtAge(jump.dt)+". Could be a release or flood wave, so verify");
+    }
+  }
+
   const fpts=(fc.data||[]).filter(p=>ok(p.primary));
   if(fpts.length){
     const peak=Math.max(...fpts.map(p=>p.primary));
@@ -195,10 +224,11 @@ async function run(){
   if(busy) return; busy=true;
   $("stamp").textContent="Refreshing…";
   const staleH=Math.max(1,+$("stale").value||6);
+  const jumpFt=Math.max(0.5,+$("jump").value||3);
   let usgs=null; const n=$("notice");
   try{ usgs=await loadUsgs(); n.style.display="none"; }
   catch(e){ n.style.display="block"; n.textContent="USGS data unavailable ("+e.message+"). Showing NWS checks only."; }
-  results=await pool(SITES,6,s=>checkSite(s,usgs,staleH));
+  results=await pool(SITES,6,s=>checkSite(s,usgs,staleH,jumpFt));
   try{ localStorage.setItem("hadFc",JSON.stringify([...HAD_FC])); }catch(e){}
   render(); alertNew();
   $("stamp").textContent="Updated "+new Date().toLocaleTimeString()+" · auto-refreshes every "+REFRESH_MIN+" min";
@@ -207,6 +237,7 @@ async function run(){
 
 $("only").addEventListener("change",render);
 $("stale").addEventListener("change",run);
+$("jump").addEventListener("change",run);
 $("refresh").addEventListener("click",run);
 $("notify").addEventListener("click",()=>{ if("Notification" in window) Notification.requestPermission().then(p=>$("notify").textContent=p==="granted"?"Desktop alerts on":"Alerts blocked"); });
 run(); setInterval(run,REFRESH_MIN*60000);
